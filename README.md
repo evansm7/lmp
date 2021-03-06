@@ -10,6 +10,8 @@ This routine converts an in-memory MOD file into (buffers of) signed 16-bit PCM 
 
 It's ideal for embedding into, er, embedded things: it's about 3KB of code in a Cortex-M4 project, for instance.
 
+Add a sound track (hahaha SWIDT) for your demos, games, etc. on your ARM Cortex-M board in one easy step!
+
 
 ## Usage
 
@@ -36,7 +38,7 @@ int16_t pb_buffer[BUF_SIZE];
 
 while (playing_pcm) {
 	if (buffer_needs_refilling)
-		lmp_fill_buffer(&mpstate, pb_buffer, BUF_SIZE);
+		lmp_fill_buffer(&mpstate, pb_buffer, BUF_SIZE, LMP_STEREO_SOFT);
 }
 ~~~
 

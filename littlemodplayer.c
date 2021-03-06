@@ -12,11 +12,11 @@
  *
  *	mps_t	mpstate;
  * 	lmp_init(&mpstate, pointer_to_modfile);
- *      lmp_set_option(&mpstate, ...); // Optional, configure looping, stereo
+ *      lmp_set_option(&mpstate, ...); // Optional, configure looping
  *
  * Generate samples repeatedly, to fill audio buffer:
  *
- *	lmp_fill_buffer(&mpstate, sample_buffer, OUTPUT_BUFFERSIZE);
+ *	lmp_fill_buffer(&mpstate, sample_buffer, OUTPUT_BUFFERSIZE, LMP_MONO);
  *
  * 6 March 2020 (c) 2021 Matt Evans
  */
