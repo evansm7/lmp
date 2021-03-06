@@ -4,7 +4,7 @@
 #include <inttypes.h>
 
 /******************************************************************************/
-/* Internal types/structs: these may change */
+/* Internal types/structs/functions: these may change */
 
 typedef struct {
 	int8_t *sample;
@@ -64,21 +64,40 @@ typedef struct {
 	unsigned int samples_per_tick;
 } mps_t;
 
+int	lmp_fill_buffer_mono(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size);
+int	lmp_fill_buffer_stereo_hard(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size);
+int	lmp_fill_buffer_stereo_soft(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size);
+
 /******************************************************************************/
 /* External API */
 
-int 		lmp_init(mps_t *mps, uint8_t *mod_base);
-unsigned int 	lmp_get_length(mps_t *mps);
-void		lmp_set_pos(mps_t *mps, unsigned int pos);
-int 		lmp_fill_buffer(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size);
+typedef enum { LMP_MONO, LMP_STEREO_SOFT, LMP_STEREO_HARD } lmp_mix_t;
 
-#define LMP_OPT_LOOP		0
-#define LMP_OPT_STEREO		1
-#define LMP_OPT_STEREO_VAL_MONO	0
-#define LMP_OPT_STEREO_VAL_STEREO	1
-#define LMP_OPT_STEREO_VAL_ST_HARD	2
-#define LMP_OPT_SUPPORT_TEMPO	2
+int 		lmp_init(mps_t *mps, uint8_t *mod_base);
+
+unsigned int 	lmp_get_length(mps_t *mps);
+
+void		lmp_set_pos(mps_t *mps, unsigned int pos);
+
+#define LMP_OPT_LOOP		0	/* Default: yes */
+#define LMP_OPT_SUPPORT_TEMPO	1	/* Default: yes */
 void		lmp_set_option(mps_t *mps, unsigned int option, unsigned int val);
+
+/* The main generation routine is selected by stereo/mono mix type (hopefully statically): */
+static inline int	lmp_fill_buffer(mps_t *mps, int16_t *samples,
+					unsigned int sample_buffer_size,
+					lmp_mix_t mix_type)
+{
+	if (mix_type == LMP_MONO)
+		return lmp_fill_buffer_mono(mps, samples, sample_buffer_size);
+	else if (mix_type == LMP_STEREO_HARD)
+		return lmp_fill_buffer_stereo_hard(mps, samples, sample_buffer_size);
+	else if (mix_type == LMP_STEREO_SOFT)
+		return lmp_fill_buffer_stereo_soft(mps, samples, sample_buffer_size);
+	else
+		return -1;
+}
+
 
 
 #endif

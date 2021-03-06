@@ -170,7 +170,6 @@ int 	lmp_init(mps_t *mps, uint8_t *mod_base)
 
 	/* Defaults to looping */
 	mps->song_loop = 1;
-	mps->stereo = 1;
 	mps->support_tempo = 1;
 
 	return 0;
@@ -187,12 +186,23 @@ void	lmp_set_option(mps_t *mps, unsigned int option, unsigned int val)
 			mps->support_tempo = !!val;
 			break;
 
-		case LMP_OPT_STEREO:
-			mps->stereo = val;
-			break;
-
 		default:
 			break;
+	}
+}
+
+/* Total number of patterns in song sequence */
+unsigned int 	lmp_get_length(mps_t *mps)
+{
+	return mps->length;
+}
+
+/* Set position in song sequence (0..(length-1)) */
+void	lmp_set_pos(mps_t *mps, unsigned int pos)
+{
+	if (pos < mps->length) {
+		mps->pos = pos;
+		mps->pos_pattern = 0;
 	}
 }
 
@@ -409,131 +419,159 @@ static int lmp_tick(mps_t *mps)
 	return 0;
 }
 
-/* Total number of patterns in song sequence */
-unsigned int 	lmp_get_length(mps_t *mps)
+static void	lmp_render_samples(mps_t *mps, int16_t csamp[4])
 {
-	return mps->length;
-}
+	for (int chan = 0; chan < 4; chan++) {
+		int32_t c1, c2;
+		int32_t c = 0;;
+		if (mps->cs[chan].on) {
+			/* Linear interpolation between samples based on
+			 * fractional part of 'pos' (that is, a sample
+			 * is taken somewhere between two coarser
+			 * instrument sample points, and blended with
+			 * components of each weighted by distance). */
+			int frac = mps->cs[chan].pos & ((1 << SAMP_FP_SPLIT)-1);
+			int nfrac = (1 << SAMP_FP_SPLIT) -
+				(mps->cs[chan].pos & ((1 << SAMP_FP_SPLIT)-1));
 
-/* Set position in song sequence (0..(length-1)) */
-void		lmp_set_pos(mps_t *mps, unsigned int pos)
-{
-	if (pos < mps->length) {
-		mps->pos = pos;
-		mps->pos_pattern = 0;
+			c1 = (int)mps->cs[chan].sample[mps->cs[chan].pos >> SAMP_FP_SPLIT] * 0x100;
+			/* This might go off the end of the sample.
+			 *
+			 * Though that generally sounds fine, it's messy to access
+			 * off the end of the file given to us!
+			 */
+			if ((mps->cs[chan].pos >> SAMP_FP_SPLIT) <
+			    (mps->cs[chan].len >> SAMP_FP_SPLIT))
+				c2 = (int)mps->cs[chan].sample[(mps->cs[chan].pos >>
+								SAMP_FP_SPLIT) + 1] * 0x100;
+			else
+				c2 = c1;
+
+			/* Linear interpolate between c1 and c2: */
+			c = ((c1 * nfrac) + (c2 * frac)) >> SAMP_FP_SPLIT;
+
+			MPDBG(5, "C%d: %08x %04x len %08x rpt_pos %08x rpt_end %08x "
+			      "(c1 %08x c2 %08x nf %08x f %08x)\n",
+			      chan,
+			      mps->cs[chan].pos,
+			      c & 0xffff, mps->cs[chan].len,
+			      mps->cs[chan].repeat_pos,
+			      mps->cs[chan].repeat_end,
+			      c1, c2, nfrac, frac);
+
+			/* Scale volume: */
+			c = (c * mps->cs[chan].vol) / 64;
+
+			mps->cs[chan].pos += mps->cs[chan].phaseinc;
+
+			if ((mps->cs[chan].looping < 2) &&
+			    (mps->cs[chan].pos > mps->cs[chan].len)) {
+				/* Reached very end. */
+				if (mps->cs[chan].looping == 0) {
+					/* No repeat, finish: */
+					mps->cs[chan].on = 0;
+				} else /* looping = 1 */ {
+					mps->cs[chan].looping = 2;
+				}
+			}
+
+			if ((mps->cs[chan].looping == 2) &&
+			    (mps->cs[chan].pos > mps->cs[chan].repeat_end)) {
+				mps->cs[chan].pos = mps->cs[chan].repeat_pos;
+			}
+		}
+		csamp[chan] = (int16_t)c;
 	}
 }
 
-/* Render a buffer of samples from the song.
- * Returns 1 if song ongoing, 0 if song ended (song is set to not loop).
+static int lmp_check_for_tick(mps_t *mps)
+{
+	if (--mps->sample_counter == 0) {
+		mps->sample_counter = mps->samples_per_tick;
+		return lmp_tick(mps);
+	}
+	return 0;
+}
+
+/* These functions render a buffer of samples from the song.
+ * Return 1 if song ongoing, 0 if song ended (song is set to not loop).
  *
- * Samples are s16; stereo, if configured, outputs left-right (2 samples), mono 1 sample.
+ * They are split out to compile-time select mono or stereo variants.
+ *
+ * Samples are s16; stereo outputs left-right (2 samples), mono 1 sample.
  * sample_buffer_size is in units of number of samples.
  */
-int 	lmp_fill_buffer(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size)
+
+/* Mono */
+int 	lmp_fill_buffer_mono(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size)
+{
+	int done = 0;
+	/* Mix active samples remaining for this frame: */
+	for (unsigned int i = 0; i < sample_buffer_size; i++) {
+		int32_t sum = 0;
+		int16_t csamp[4];
+
+		lmp_render_samples(mps, csamp);
+
+		/* Mono, average channels: */
+		for (int chan = 0; chan < 4; chan++) {
+			sum += csamp[chan];
+		}
+		samples[i] = host_to_LE16(sum/4);
+
+		done |= lmp_check_for_tick(mps);
+	}
+
+	/* Returns true if we should keep being called... */
+	return !done;
+}
+
+/* Hard stereo */
+int 	lmp_fill_buffer_stereo_hard(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size)
 {
 	int done = 0;
 	/* Mix active samples remaining for this frame: */
 	for (unsigned int i = 0; i < sample_buffer_size; i++) {
 		int16_t csamp[4];
 
-		for (int chan = 0; chan < 4; chan++) {
-			int32_t c1, c2;
-			int32_t c = 0;;
-			if (mps->cs[chan].on) {
-				/* Linear interpolation between samples based on
-				 * fractional part of 'pos' (that is, a sample
-				 * is taken somewhere between two coarser
-				 * instrument sample points, and blended with
-				 * components of each weighted by distance). */
-				int frac = mps->cs[chan].pos & ((1 << SAMP_FP_SPLIT)-1);
-				int nfrac = (1 << SAMP_FP_SPLIT) -
-					(mps->cs[chan].pos & ((1 << SAMP_FP_SPLIT)-1));
+		lmp_render_samples(mps, csamp);
 
-				c1 = (int)mps->cs[chan].sample[mps->cs[chan].pos >> SAMP_FP_SPLIT] * 0x100;
-				/* This might go off the end of the sample.
-				 *
-				 * Though that generally sounds fine, it's messy to access
-				 * off the end of the file given to us!
-				 */
-				if ((mps->cs[chan].pos >> SAMP_FP_SPLIT) <
-				    (mps->cs[chan].len >> SAMP_FP_SPLIT))
-					c2 = (int)mps->cs[chan].sample[(mps->cs[chan].pos >>
-									SAMP_FP_SPLIT) + 1] * 0x100;
-				else
-					c2 = c1;
+		/* Stereo (hard panning):
+		 *
+		 * LRRL separation.  "Sounds rough, but it's cheap", as
+		 * they say.
+		 */
+		samples[i] = host_to_LE16((csamp[0] + csamp[3])/2);
+		i++;
+		samples[i] = host_to_LE16((csamp[1] + csamp[2])/2);
 
-				/* Linear interpolate between c1 and c2: */
-				c = ((c1 * nfrac) + (c2 * frac)) >> SAMP_FP_SPLIT;
+		done |= lmp_check_for_tick(mps);
+	}
 
-				MPDBG(5, "C%d: %08x %04x len %08x rpt_pos %08x rpt_end %08x "
-				      "(c1 %08x c2 %08x nf %08x f %08x)\n",
-				      chan,
-				      mps->cs[chan].pos,
-				      c & 0xffff, mps->cs[chan].len,
-				      mps->cs[chan].repeat_pos,
-				      mps->cs[chan].repeat_end,
-				      c1, c2, nfrac, frac);
+	return !done;
+}
 
-				/* Scale volume: */
-				c = (c * mps->cs[chan].vol) / 64;
+/* Soft stereo */
+int 	lmp_fill_buffer_stereo_soft(mps_t *mps, int16_t *samples, unsigned int sample_buffer_size)
+{
+	int done = 0;
+	/* Mix active samples remaining for this frame: */
+	for (unsigned int i = 0; i < sample_buffer_size; i++) {
+		int16_t csamp[4];
 
-				mps->cs[chan].pos += mps->cs[chan].phaseinc;
+		lmp_render_samples(mps, csamp);
 
-				if ((mps->cs[chan].looping < 2) &&
-				    (mps->cs[chan].pos > mps->cs[chan].len)) {
-					/* Reached very end. */
-					if (mps->cs[chan].looping == 0) {
-						/* No repeat, finish: */
-						mps->cs[chan].on = 0;
-					} else /* looping = 1 */ {
-						mps->cs[chan].looping = 2;
-					}
-				}
+		/* Stereo:
+		 *
+		 * Rather than "hard" Amiga LRRL separation, blend as:
+		 * L = ((c0 + c3)*(2/3) + (c1 + c2)*(1/3))/2
+		 * R = ((c1 + c2)*(2/3) + (c0 + c3)*(1/3))/2
+		 */
+		samples[i] = host_to_LE16((((csamp[0] + csamp[3])*2) + (csamp[1] + csamp[2]))/6);
+		i++;
+		samples[i] = host_to_LE16((((csamp[1] + csamp[2])*2) + (csamp[0] + csamp[3]))/6);
 
-				if ((mps->cs[chan].looping == 2) &&
-				    (mps->cs[chan].pos > mps->cs[chan].repeat_end)) {
-					mps->cs[chan].pos = mps->cs[chan].repeat_pos;
-				}
-			}
-			csamp[chan] = (int16_t)c;
-		}
-
-		if (mps->stereo == LMP_OPT_STEREO_VAL_MONO) {
-			/* Mono */
-			int32_t sum = 0;
-
-			for (int chan = 0; chan < 4; chan++) {
-				sum += csamp[chan];
-			}
-
-			samples[i] = host_to_LE16(sum/4);
-		} else if (mps->stereo == LMP_OPT_STEREO_VAL_STEREO) {
-			/* Stereo:
-			 *
-			 * Rather than "hard" Amiga LRRL separation, blend as:
-			 * L = ((c0 + c3)*(2/3) + (c1 + c2)*(1/3))/2
-			 * R = ((c1 + c2)*(2/3) + (c0 + c3)*(1/3))/2
-			 */
-			samples[i] = host_to_LE16((((csamp[0] + csamp[3])*2) + (csamp[1] + csamp[2]))/6);
-			i++;
-			samples[i] = host_to_LE16((((csamp[1] + csamp[2])*2) + (csamp[0] + csamp[3]))/6);
-		} else if (mps->stereo == LMP_OPT_STEREO_VAL_ST_HARD) {
-			/* Stereo (hard panning):
-			 *
-			 * LRRL separation.  "Sounds rough, but it's cheap", as
-			 * they say.
-			 */
-			samples[i] = host_to_LE16((csamp[0] + csamp[3])/2);
-			i++;
-			samples[i] = host_to_LE16((csamp[1] + csamp[2])/2);
-		}
-
-		if (--mps->sample_counter == 0) {
-			mps->sample_counter = mps->samples_per_tick;
-
-			done = lmp_tick(mps);
-		}
+		done |= lmp_check_for_tick(mps);
 	}
 
 	/* Returns true if we should keep being called... */
@@ -613,7 +651,6 @@ int 	main(int argc, char *argv[])
 
 	lmp_init(&mpstate, modfile);
 	lmp_set_option(&mpstate, LMP_OPT_LOOP, 0);
-	lmp_set_option(&mpstate, LMP_OPT_STEREO, LMP_OPT_STEREO_VAL_STEREO);
 
 	/* Run till done */
 	unsigned int len = 0;
@@ -621,7 +658,7 @@ int 	main(int argc, char *argv[])
 	unsigned int max_len = (60*5) * (2*LMP_SAMPLERATE/OUTPUT_BUFFERSIZE);
 	int more;
 	do {
-		more = lmp_fill_buffer(&mpstate, sample_buffer, OUTPUT_BUFFERSIZE);
+		more = lmp_fill_buffer(&mpstate, sample_buffer, OUTPUT_BUFFERSIZE, LMP_STEREO_SOFT);
 		write(ofd, sample_buffer, OUTPUT_BUFFERSIZE*sizeof(int16_t));
 		len++;
 	} while(more && (len < max_len));
