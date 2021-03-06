@@ -564,17 +564,16 @@ int 	lmp_fill_buffer_stereo_soft(mps_t *mps, int16_t *samples, unsigned int samp
 		/* Stereo:
 		 *
 		 * Rather than "hard" Amiga LRRL separation, blend as:
-		 * L = ((c0 + c3)*(2/3) + (c1 + c2)*(1/3))/2
-		 * R = ((c1 + c2)*(2/3) + (c0 + c3)*(1/3))/2
+		 * L = ((c0 + c3)*(3/4) + (c1 + c2)*(1/4))/2
+		 * R = ((c1 + c2)*(3/4) + (c0 + c3)*(1/4))/2
 		 */
-		samples[i] = host_to_LE16((((csamp[0] + csamp[3])*2) + (csamp[1] + csamp[2]))/6);
+		samples[i] = host_to_LE16((((csamp[0] + csamp[3])*3) + (csamp[1] + csamp[2]))/(4*2));
 		i++;
-		samples[i] = host_to_LE16((((csamp[1] + csamp[2])*2) + (csamp[0] + csamp[3]))/6);
+		samples[i] = host_to_LE16((((csamp[1] + csamp[2])*3) + (csamp[0] + csamp[3]))/(4*2));
 
 		done |= lmp_check_for_tick(mps);
 	}
 
-	/* Returns true if we should keep being called... */
 	return !done;
 }
 
